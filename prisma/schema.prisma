@@ -1,0 +1,514 @@
+// Prisma schema for SoundChain
+// Database: PostgreSQL
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ===========================================
+// User Management
+// ===========================================
+
+model User {
+  id            String   @id @default(cuid())
+  walletAddress String   @unique
+  email         String?  @unique
+  name          String?
+  avatar        String?
+  bio           String?  @db.Text
+  role          Role     @default(PRODUCER)
+  
+  // Settings
+  emailVerified Boolean  @default(false)
+  isActive      Boolean  @default(true)
+  
+  // Timestamps
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  
+  // Relations
+  tracks        Track[]
+  conversations Conversation[]
+  licenses      License[]       @relation("BuyerLicenses")
+  downloads     Download[]      // Download history
+  violations    Violation[]     // Violations as producer
+
+  @@index([walletAddress])
+  @@index([email])
+  @@map("users")
+}
+
+enum Role {
+  PRODUCER
+  BUYER
+  ADMIN
+}
+
+// ===========================================
+// Music Tracks
+// ===========================================
+
+model Track {
+  id          String   @id @default(cuid())
+
+  // Basic Info
+  title       String
+  description String?  @db.Text
+  audioUrl    String   // URL to audio file (IPFS)
+  coverArtUrl String?  // URL to cover art
+  duration    Int      // Duration in seconds
+
+  // Music Metadata
+  genre       String[] // Array of genres
+  bpm         Int?     // Beats per minute
+  key         String?  // Musical key (e.g., "C Minor")
+  mood        String[] // e.g., ["Upbeat", "Energetic"]
+  instruments String[] // e.g., ["Piano", "Drums"]
+
+  // ===========================================
+  // Multi-Chain Support (Chain-Agnostic)
+  // ===========================================
+
+  // Primary chain where NFT is minted
+  primaryChain  Chain    // SUI, BASE, STORY, OPTIMISM
+  chainTxHash   String   // Transaction hash on primary chain
+
+  // Chain-specific NFT IDs (only one will be populated)
+  suiObjectId      String? @unique  // Sui: Object ID
+  baseTokenId      String? @unique  // Base: ERC-721 Token ID
+  storyIpAssetId   String? @unique  // Story: IP Asset ID
+  optimismTokenId  String? @unique  // Optimism: ERC-721 Token ID
+
+  // Chain-specific features
+  ipProtected   Boolean  @default(false)  // Story Protocol IP registration
+  evmCompatible Boolean  @default(false)  // Base/Optimism EVM chains
+
+  // Pricing (multi-currency support)
+  nativePrice    Decimal  @db.Decimal(10, 9)  // Price in native token (SUI or ETH)
+  usdPrice       Decimal  @db.Decimal(10, 2)  // Converted USD price (for comparison)
+  nativeCurrency String   // "SUI" or "ETH"
+
+  // Licensing Configuration
+  baseTerms     Json    // Base licensing terms set by producer
+  // Example structure:
+  // {
+  //   "minPrice": 500,
+  //   "maxPrice": 5000,
+  //   "availableRights": ["YOUTUBE", "COMMERCIAL", "STREAMING"],
+  //   "exclusivityAvailable": true,
+  //   "customTermsAllowed": true
+  // }
+
+  // Status
+  isPublished Boolean  @default(false)
+  isDraft     Boolean  @default(true)
+
+  // Stats
+  views       Int      @default(0)
+  downloads   Int      @default(0)
+  sales       Int      @default(0)
+
+  // Producer
+  producerId  String
+  producer    User     @relation(fields: [producerId], references: [id], onDelete: Cascade)
+
+  // Timestamps
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  publishedAt DateTime?
+
+  // Relations
+  conversations Conversation[]
+  licenses      License[]
+  trackViews    TrackView[]
+  downloadHistory Download[]    // Download history (renamed to avoid conflict with downloads count)
+  violations    Violation[]     // Violations for this track
+
+  @@index([producerId])
+  @@index([primaryChain])
+  @@index([ipProtected])
+  @@index([isPublished])
+  @@index([createdAt])
+  @@index([usdPrice])
+  @@map("tracks")
+}
+
+// Blockchain options
+enum Chain {
+  SUI       // Sui Network (fastest, cheapest)
+  BASE      // Base L2 (EVM, Coinbase)
+  STORY     // Story Protocol (IP protection)
+  OPTIMISM  // Optimism (EVM alternative)
+}
+
+// ===========================================
+// Licensing Negotiations
+// ===========================================
+
+model Conversation {
+  id       String              @id @default(cuid())
+  
+  // Track being negotiated
+  trackId  String
+  track    Track               @relation(fields: [trackId], references: [id], onDelete: Cascade)
+  
+  // Buyer
+  buyerId  String
+  buyer    User                @relation(fields: [buyerId], references: [id], onDelete: Cascade)
+  
+  // Status
+  status   ConversationStatus  @default(ACTIVE)
+  
+  // Agreed Terms (populated when negotiation completes)
+  agreedTerms Json?
+  // Example structure:
+  // {
+  //   "price": 750,
+  //   "usageRights": ["YOUTUBE", "COMMERCIAL"],
+  //   "exclusivity": false,
+  //   "territory": "WORLDWIDE",
+  //   "duration": null,
+  //   "attribution": true,
+  //   "customTerms": "..."
+  // }
+  
+  // Claude Context
+  claudeContext Json?  // Store conversation context for Claude
+  
+  // Timestamps
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  completedAt DateTime?
+  
+  // Relations
+  messages  Message[]
+  license   License?
+  
+  @@index([trackId])
+  @@index([buyerId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("conversations")
+}
+
+enum ConversationStatus {
+  ACTIVE      // Negotiation ongoing
+  COMPLETED   // Agreement reached
+  ABANDONED   // Negotiation abandoned
+}
+
+model Message {
+  id             String       @id @default(cuid())
+  
+  // Conversation
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  
+  // Content
+  role           MessageRole
+  content        String       @db.Text
+  
+  // Metadata
+  metadata       Json?        // Store any additional context
+  
+  // Timestamp
+  createdAt      DateTime     @default(now())
+  
+  @@index([conversationId])
+  @@index([createdAt])
+  @@map("messages")
+}
+
+enum MessageRole {
+  USER       // Buyer's message
+  ASSISTANT  // Claude's response
+  SYSTEM     // System messages
+}
+
+// ===========================================
+// Licenses
+// ===========================================
+
+model License {
+  id        String        @id @default(cuid())
+
+  // Track
+  trackId   String
+  track     Track         @relation(fields: [trackId], references: [id], onDelete: Cascade)
+
+  // Buyer
+  buyerId   String
+  buyer     User          @relation("BuyerLicenses", fields: [buyerId], references: [id], onDelete: Cascade)
+
+  // Conversation (if from negotiation)
+  conversationId String?  @unique
+  conversation   Conversation? @relation(fields: [conversationId], references: [id])
+
+  // ===========================================
+  // Multi-Chain Support
+  // ===========================================
+
+  // Primary chain (inherits from Track's chain)
+  primaryChain    Chain
+
+  // Chain-specific License IDs (only one will be populated)
+  suiLicenseId      String? @unique  // Sui: License Object ID
+  baseLicenseId     String? @unique  // Base: License NFT Token ID
+  storyLicenseId    String? @unique  // Story: License Token ID
+  optimismLicenseId String? @unique  // Optimism: License NFT Token ID
+
+  // Blockchain transaction
+  transactionHash String?  // Transaction hash on primary chain
+
+  // License Terms
+  terms       Json         // Complete license agreement
+  price       Decimal      @db.Decimal(10, 9)  // Price in native token
+  currency    Currency     // SUI or ETH
+  usdPrice    Decimal      @db.Decimal(10, 2)  // USD conversion
+
+  // Usage Rights
+  usageRights   String[]   // e.g., ["YOUTUBE", "COMMERCIAL", "STREAMING"]
+  exclusivity   Boolean    @default(false)
+  territory     String?    // e.g., "WORLDWIDE", "US", "EU"
+  duration      Int?       // Duration in months, null = perpetual
+  attribution   Boolean    @default(true)
+
+  // Custom Terms
+  customTerms   String?    @db.Text
+
+  // ===========================================
+  // Freemium Support
+  // ===========================================
+
+  // License tier (free vs paid)
+  tier            LicenseTier    @default(FREE)
+  hasWatermark    Boolean        @default(true)
+  audioQuality    AudioQuality   @default(STANDARD)
+
+  // Enforcement tracking
+  contentIdRegistered Boolean    @default(false)
+  violationClaims     Int        @default(0)
+  claimedRevenue      Decimal    @default(0) @db.Decimal(10, 2)
+
+  // Status
+  status      LicenseStatus @default(PENDING)
+
+  // Payment
+  paymentIntentId String?   // For Stripe or other payment processor
+  paidAt          DateTime?
+
+  // Expiration (for non-perpetual licenses)
+  expiresAt   DateTime?
+
+  // Timestamps
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  royaltyPayments RoyaltyPayment[]
+
+  @@index([trackId])
+  @@index([buyerId])
+  @@index([primaryChain])
+  @@index([status])
+  @@index([storyLicenseId])
+  @@index([createdAt])
+  @@map("licenses")
+}
+
+enum LicenseStatus {
+  PENDING    // Agreement reached, awaiting payment
+  ACTIVE     // Paid and active
+  EXPIRED    // Non-perpetual license expired
+  REVOKED    // Revoked by producer (rare)
+}
+
+enum LicenseTier {
+  FREE         // Personal use, watermarked
+  COMMERCIAL   // Paid, clean audio, commercial rights
+  EXCLUSIVE    // Full exclusive rights
+}
+
+enum AudioQuality {
+  STANDARD     // 128kbps, watermarked (free tier)
+  HIGH         // 320kbps, clean (commercial)
+  LOSSLESS     // WAV/FLAC (exclusive)
+}
+
+enum Currency {
+  USD
+  ETH
+  SUI
+}
+
+// ===========================================
+// Royalty Tracking (Future)
+// ===========================================
+
+model RoyaltyPayment {
+  id              String   @id @default(cuid())
+  
+  // License
+  licenseId       String
+  license         License  @relation(fields: [licenseId], references: [id])
+  
+  // Payment Details
+  amount          Decimal  @db.Decimal(10, 2)
+  currency        Currency
+  transactionHash String?  // Blockchain transaction hash
+  
+  // Recipient
+  recipientAddress String
+  
+  // Metadata
+  description     String?
+  
+  // Timestamps
+  paidAt          DateTime @default(now())
+  
+  @@index([licenseId])
+  @@index([recipientAddress])
+  @@index([paidAt])
+  @@map("royalty_payments")
+}
+
+// ===========================================
+// Analytics & Stats (Future)
+// ===========================================
+
+model TrackView {
+  id        String   @id @default(cuid())
+
+  // Track
+  trackId   String
+  track     Track    @relation(fields: [trackId], references: [id], onDelete: Cascade)
+
+  // Viewer
+  viewerId  String?  // User ID if authenticated
+  ipAddress String?  // For anonymous tracking
+
+  // Metadata
+  userAgent String?
+  referer   String?
+
+  // Timestamp
+  viewedAt  DateTime @default(now())
+
+  @@index([trackId])
+  @@index([viewedAt])
+  @@map("track_views")
+}
+
+// ===========================================
+// System & Configuration
+// ===========================================
+
+model SystemConfig {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  value     Json
+  
+  updatedAt DateTime @updatedAt
+  
+  @@map("system_config")
+}
+
+// Store system-wide settings like:
+// - Default license templates
+// - Story Protocol contract addresses
+// - Feature flags
+// - Rate limits
+// - etc.
+
+// ===========================================
+// Freemium & Enforcement
+// ===========================================
+
+model Download {
+  id        String   @id @default(cuid())
+
+  // Track downloaded
+  trackId   String
+  track     Track    @relation(fields: [trackId], references: [id], onDelete: Cascade)
+
+  // User who downloaded
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Download details
+  tier          LicenseTier
+  hasWatermark  Boolean
+  quality       AudioQuality
+
+  // Tracking
+  ipAddress     String?
+  userAgent     String?
+
+  // Timestamp
+  downloadedAt  DateTime @default(now())
+
+  @@index([trackId])
+  @@index([userId])
+  @@index([downloadedAt])
+  @@map("downloads")
+}
+
+model Violation {
+  id              String   @id @default(cuid())
+
+  // Track being violated
+  trackId         String
+  track           Track    @relation(fields: [trackId], references: [id], onDelete: Cascade)
+
+  // Producer who owns the track
+  producerId      String
+  producer        User     @relation(fields: [producerId], references: [id], onDelete: Cascade)
+
+  // Violation details
+  platform        String   // "youtube", "tiktok", "spotify", etc.
+  url             String   // URL of violating content
+  detectedBy      String?  // User ID who reported (for bounty)
+
+  // Status
+  status          ViolationStatus  @default(DETECTED)
+  action          ViolationAction  @default(PENDING)
+
+  // Revenue tracking
+  estimatedViews    Int?
+  estimatedRevenue  Decimal?  @db.Decimal(10, 2)
+  claimedRevenue    Decimal?  @db.Decimal(10, 2)
+  bountyPaid        Decimal?  @db.Decimal(10, 2)
+
+  // Notes
+  notes           String?   @db.Text
+
+  // Timestamps
+  detectedAt      DateTime  @default(now())
+  resolvedAt      DateTime?
+
+  @@index([trackId])
+  @@index([producerId])
+  @@index([status])
+  @@index([platform])
+  @@map("violations")
+}
+
+enum ViolationStatus {
+  DETECTED       // Violation detected
+  VERIFIED       // Confirmed by AI/manual review
+  RESOLVED       // Resolved (paid, removed, or licensed)
+  DISMISSED      // False positive
+}
+
+enum ViolationAction {
+  PENDING          // No action taken yet
+  TAKEDOWN         // DMCA takedown filed
+  MONETIZE         // Claiming ad revenue
+  LICENSE_OFFERED  // Sent license purchase link
+  PAID             // User purchased license
+}
